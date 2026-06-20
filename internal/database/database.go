@@ -60,12 +60,12 @@ type CDK struct {
 
 // CDKGroup CDK分组模型
 type CDKGroup struct {
-	ID          int64     `json:"id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	CDKCount    int       `json:"cdk_count,omitempty"`
-	AvailableCount int    `json:"available_count,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID             int64     `json:"id"`
+	Name           string    `json:"name"`
+	Description    string    `json:"description"`
+	CDKCount       int       `json:"cdk_count,omitempty"`
+	AvailableCount int       `json:"available_count,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 // Init 初始化数据库连接
@@ -268,8 +268,53 @@ func (db *DB) ListCredentials(limit, offset int) ([]*Credential, int, error) {
 		}
 		credentials = append(credentials, cred)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("failed to iterate credentials: %w", err)
+	}
 
 	return credentials, total, nil
+}
+
+// DeleteCredential 删除凭证，并清理本地关联关系
+func (db *DB) DeleteCredential(id int64) (int64, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var exists bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM credentials WHERE id = $1)`, id).Scan(&exists); err != nil {
+		return 0, fmt.Errorf("failed to check credential: %w", err)
+	}
+	if !exists {
+		return 0, nil
+	}
+
+	// CDK 可能已经展示给用户，删除凭证时只解除关联，不自动回收到可用池。
+	if _, err := tx.Exec(`UPDATE cdks SET credential_id = NULL WHERE credential_id = $1`, id); err != nil {
+		return 0, fmt.Errorf("failed to unlink CDK: %w", err)
+	}
+
+	if _, err := tx.Exec(`DELETE FROM callback_logs WHERE credential_id = $1`, id); err != nil {
+		return 0, fmt.Errorf("failed to delete callback logs: %w", err)
+	}
+
+	result, err := tx.Exec(`DELETE FROM credentials WHERE id = $1`, id)
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete credential: %w", err)
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get affected rows: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return affected, nil
 }
 
 // CreateCDK 创建CDK
@@ -345,6 +390,9 @@ func (db *DB) ListCDKs(limit, offset int) ([]*CDK, int, error) {
 		}
 		cdks = append(cdks, cdk)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("failed to iterate cdks: %w", err)
+	}
 
 	return cdks, total, nil
 }
@@ -392,7 +440,7 @@ func (db *DB) SetSiteConfig(key, value string) error {
 // GetStats 获取统计数据
 func (db *DB) GetStats() (map[string]int, error) {
 	stats := make(map[string]int)
-	
+
 	queries := map[string]string{
 		"total_credentials":    "SELECT COUNT(*) FROM credentials",
 		"pending_credentials":  "SELECT COUNT(*) FROM credentials WHERE status = 'pending'",
@@ -419,7 +467,7 @@ func (db *DB) GetAvailableCDK(groupID *int64) (*CDK, error) {
 	cdk := &CDK{}
 	var query string
 	var err error
-	
+
 	if groupID != nil {
 		query = `SELECT id, code, group_id, credential_id, is_used, created_at, used_at 
 				  FROM cdks 
@@ -435,7 +483,7 @@ func (db *DB) GetAvailableCDK(groupID *int64) (*CDK, error) {
 				  LIMIT 1`
 		err = db.QueryRow(query).Scan(&cdk.ID, &cdk.Code, &cdk.GroupID, &cdk.CredentialID, &cdk.IsUsed, &cdk.CreatedAt, &cdk.UsedAt)
 	}
-	
+
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -448,10 +496,21 @@ func (db *DB) GetAvailableCDK(groupID *int64) (*CDK, error) {
 // AssignCDKToCredential 将CDK分配给凭证
 func (db *DB) AssignCDKToCredential(cdkID, credentialID int64) error {
 	now := time.Now()
-	query := `UPDATE cdks SET credential_id = $1, is_used = true, used_at = $2 WHERE id = $3`
-	_, err := db.Exec(query, credentialID, now, cdkID)
+	query := `
+		UPDATE cdks
+		SET credential_id = $1, is_used = true, used_at = $2
+		WHERE id = $3 AND is_used = false AND credential_id IS NULL
+	`
+	result, err := db.Exec(query, credentialID, now, cdkID)
 	if err != nil {
 		return fmt.Errorf("failed to assign CDK: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get affected rows: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("CDK不可用或已被分配")
 	}
 	return nil
 }
@@ -470,7 +529,7 @@ func (db *DB) AddCDK(code string, groupID *int64) error {
 func (db *DB) BatchAddCDKs(codes []string, groupID *int64) (int, int, error) {
 	added := 0
 	skipped := 0
-	
+
 	for _, code := range codes {
 		// 检查是否已存在
 		var exists bool
@@ -478,12 +537,12 @@ func (db *DB) BatchAddCDKs(codes []string, groupID *int64) (int, int, error) {
 		if err != nil {
 			return added, skipped, fmt.Errorf("failed to check CDK: %w", err)
 		}
-		
+
 		if exists {
 			skipped++
 			continue
 		}
-		
+
 		// 添加CDK
 		_, err = db.Exec(`INSERT INTO cdks (code, group_id, is_used) VALUES ($1, $2, false)`, code, groupID)
 		if err != nil {
@@ -491,7 +550,7 @@ func (db *DB) BatchAddCDKs(codes []string, groupID *int64) (int, int, error) {
 		}
 		added++
 	}
-	
+
 	return added, skipped, nil
 }
 
@@ -509,7 +568,7 @@ func (db *DB) BatchDeleteCDK(ids []int64) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	
+
 	// 构建 IN 子句的占位符
 	placeholders := make([]string, len(ids))
 	args := make([]interface{}, len(ids))
@@ -517,13 +576,13 @@ func (db *DB) BatchDeleteCDK(ids []int64) (int64, error) {
 		placeholders[i] = fmt.Sprintf("$%d", i+1)
 		args[i] = id
 	}
-	
+
 	query := fmt.Sprintf(`DELETE FROM cdks WHERE id IN (%s)`, strings.Join(placeholders, ","))
 	result, err := db.Exec(query, args...)
 	if err != nil {
 		return 0, fmt.Errorf("failed to batch delete CDKs: %w", err)
 	}
-	
+
 	affected, _ := result.RowsAffected()
 	return affected, nil
 }
@@ -562,6 +621,9 @@ func (db *DB) ListCDKGroups() ([]*CDKGroup, error) {
 			return nil, fmt.Errorf("failed to scan CDK group: %w", err)
 		}
 		groups = append(groups, group)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate CDK groups: %w", err)
 	}
 	return groups, nil
 }
@@ -604,7 +666,7 @@ func (db *DB) DeleteCDKGroup(id int64) error {
 	if count > 0 {
 		return fmt.Errorf("该分组下还有 %d 个CDK，请先移除", count)
 	}
-	
+
 	_, err = db.Exec(`DELETE FROM cdk_groups WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("failed to delete CDK group: %w", err)
@@ -619,18 +681,18 @@ func (db *DB) DeleteCDKGroupWithCDKs(id int64) error {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback()
-	
+
 	// 先删除分组内所有CDK
 	_, err = tx.Exec(`DELETE FROM cdks WHERE group_id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("failed to delete CDKs in group: %w", err)
 	}
-	
+
 	// 再删除分组
 	_, err = tx.Exec(`DELETE FROM cdk_groups WHERE id = $1`, id)
 	if err != nil {
 		return fmt.Errorf("failed to delete CDK group: %w", err)
 	}
-	
+
 	return tx.Commit()
 }

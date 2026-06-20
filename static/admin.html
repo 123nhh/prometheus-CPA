@@ -1023,6 +1023,7 @@
                                 <th>项目ID</th>
                                 <th>状态</th>
                                 <th>创建时间</th>
+                                <th>操作</th>
                             </tr>
                         </thead>
                         <tbody id="credentialsTable">
@@ -1242,10 +1243,13 @@
         
         // 主题逻辑
         function setTheme(theme) {
+            const allowedThemes = new Set(['light', 'ocean', 'gold', 'neon']);
+            if (!allowedThemes.has(theme)) theme = 'light';
             document.body.removeAttribute('data-theme');
             if (theme !== 'ocean') document.body.setAttribute('data-theme', theme);
             document.querySelectorAll('.theme-btn').forEach(btn => btn.classList.remove('active'));
-            document.querySelector(`.t-${theme}`).classList.add('active');
+            const themeBtn = document.querySelector(`.t-${theme}`);
+            if (themeBtn) themeBtn.classList.add('active');
             localStorage.setItem('site-theme', theme);
         }
         
@@ -1256,6 +1260,27 @@
         let credentialsPage = 0;
         let cdksPage = 0;
         const pageSize = 20;
+
+        const htmlEscapeMap = {
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;'
+        };
+
+        function escapeHtml(value) {
+            return String(value ?? '').replace(/[&<>"']/g, ch => htmlEscapeMap[ch]);
+        }
+
+        function escapeAttr(value) {
+            return escapeHtml(value).replace(/`/g, '&#96;');
+        }
+
+        function safeNumber(value, fallback = 0) {
+            const num = Number(value);
+            return Number.isFinite(num) ? num : fallback;
+        }
 
         // 标签页切换
         document.querySelectorAll('.tab').forEach(tab => {
@@ -1312,7 +1337,7 @@
                 if (!result.data || result.data.length === 0) {
                     tbody.innerHTML = `
                         <tr>
-                            <td colspan="6">
+                            <td colspan="7">
                                 <div class="empty-state">
                                     <div class="icon">📭</div>
                                     <p>暂无凭证数据</p>
@@ -1323,21 +1348,53 @@
                     return;
                 }
                 
-                tbody.innerHTML = result.data.map(cred => `
-                    <tr>
-                        <td>${cred.id}</td>
-                        <td><span class="badge badge-info">${cred.type}</span></td>
-                        <td>${cred.email}</td>
-                        <td>${cred.project_id}</td>
-                        <td><span class="badge badge-${getStatusClass(cred.status)}">${cred.status}</span></td>
-                        <td>${formatDate(cred.created_at)}</td>
-                    </tr>
-                `).join('');
+                tbody.innerHTML = result.data.map(cred => {
+                    const id = safeNumber(cred.id);
+                    const status = String(cred.status ?? '');
+                    return `
+                        <tr>
+                            <td>${id}</td>
+                            <td><span class="badge badge-info">${escapeHtml(cred.type)}</span></td>
+                            <td>${escapeHtml(cred.email)}</td>
+                            <td>${escapeHtml(cred.project_id)}</td>
+                            <td><span class="badge badge-${getStatusClass(status)}">${escapeHtml(status)}</span></td>
+                            <td>${escapeHtml(formatDate(cred.created_at))}</td>
+                            <td>
+                                <button class="refresh-btn" style="color: var(--error-text);" onclick="deleteCredential(${id})">删除</button>
+                            </td>
+                        </tr>
+                    `;
+                }).join('');
                 
                 credentialsPage = page;
                 updatePagination('credentialsPagination', result.total, page, loadCredentials);
             } catch (error) {
                 console.error('Failed to load credentials:', error);
+            }
+        }
+
+        // 删除凭证
+        async function deleteCredential(id) {
+            if (!confirm('确定要删除这个凭证吗？此操作只删除捐赠站本地记录，不会操作CPA。')) {
+                return;
+            }
+
+            try {
+                const rowCount = document.querySelectorAll('#credentialsTable tr').length;
+                const nextPage = rowCount <= 1 && credentialsPage > 0 ? credentialsPage - 1 : credentialsPage;
+                const response = await fetch(`/api/admin/credentials/${id}`, {
+                    method: 'DELETE'
+                });
+                const result = await response.json();
+
+                if (response.ok) {
+                    loadCredentials(nextPage);
+                    loadStats();
+                } else {
+                    alert('删除失败: ' + result.error);
+                }
+            } catch (error) {
+                alert('删除失败: ' + error.message);
             }
         }
 
@@ -1366,20 +1423,24 @@
                     return;
                 }
                 
-                tbody.innerHTML = result.data.map(cdk => `
-                    <tr>
-                        <td><input type="checkbox" class="cdk-checkbox" value="${cdk.id}" onchange="updateSelectedCount()"></td>
-                        <td>${cdk.id}</td>
-                        <td><code style="background: var(--bg-secondary); padding: 5px 10px; border-radius: 4px;">${cdk.code}</code></td>
-                        <td>${cdk.group_name || '-'}</td>
-                        <td>${cdk.credential_id || '-'}</td>
-                        <td><span class="badge badge-${cdk.is_used ? 'warning' : 'success'}">${cdk.is_used ? '已使用' : '可用'}</span></td>
-                        <td>${formatDate(cdk.created_at)}</td>
-                        <td>
-                            <button class="refresh-btn" style="color: var(--error-text);" onclick="deleteCdk(${cdk.id})">删除</button>
-                        </td>
-                    </tr>
-                `).join('');
+                tbody.innerHTML = result.data.map(cdk => {
+                    const id = safeNumber(cdk.id);
+                    const credentialId = cdk.credential_id == null ? '-' : escapeHtml(cdk.credential_id);
+                    return `
+                        <tr>
+                            <td><input type="checkbox" class="cdk-checkbox" value="${id}" onchange="updateSelectedCount()"></td>
+                            <td>${id}</td>
+                            <td><code style="background: var(--bg-secondary); padding: 5px 10px; border-radius: 4px;">${escapeHtml(cdk.code)}</code></td>
+                            <td>${escapeHtml(cdk.group_name || '-')}</td>
+                            <td>${credentialId}</td>
+                            <td><span class="badge badge-${cdk.is_used ? 'warning' : 'success'}">${cdk.is_used ? '已使用' : '可用'}</span></td>
+                            <td>${escapeHtml(formatDate(cdk.created_at))}</td>
+                            <td>
+                                <button class="refresh-btn" style="color: var(--error-text);" onclick="deleteCdk(${id})">删除</button>
+                            </td>
+                        </tr>
+                    `;
+                }).join('');
                 
                 cdksPage = page;
                 updatePagination('cdksPagination', result.total, page, loadCdks);
@@ -1663,10 +1724,13 @@
                 // 更新分组选择框 (单个CDK)
                 const groupSelect = document.getElementById('cdkGroupInput');
                 if (groupSelect) {
-                    groupSelect.innerHTML = '<option value="">无分组</option>';
+                    groupSelect.replaceChildren(new Option('无分组', ''));
                     if (groups) {
                         groups.forEach(g => {
-                            groupSelect.innerHTML += `<option value="${g.id}">${g.name} (${g.available_count}/${g.cdk_count})</option>`;
+                            groupSelect.appendChild(new Option(
+                                `${g.name || ''} (${safeNumber(g.available_count)}/${safeNumber(g.cdk_count)})`,
+                                String(safeNumber(g.id))
+                            ));
                         });
                     }
                 }
@@ -1674,10 +1738,13 @@
                 // 更新分组选择框 (批量导入)
                 const groupSelectBatch = document.getElementById('cdkGroupInputBatch');
                 if (groupSelectBatch) {
-                    groupSelectBatch.innerHTML = '<option value="">无分组</option>';
+                    groupSelectBatch.replaceChildren(new Option('无分组', ''));
                     if (groups) {
                         groups.forEach(g => {
-                            groupSelectBatch.innerHTML += `<option value="${g.id}">${g.name} (${g.available_count}/${g.cdk_count})</option>`;
+                            groupSelectBatch.appendChild(new Option(
+                                `${g.name || ''} (${safeNumber(g.available_count)}/${safeNumber(g.cdk_count)})`,
+                                String(safeNumber(g.id))
+                            ));
                         });
                     }
                 }
@@ -1694,38 +1761,53 @@
                     return;
                 }
                 
-                container.innerHTML = groups.map(g => `
-                    <div class="group-card">
-                        <div class="group-card-header">
-                            <div>
-                                <h4 class="group-card-title">${g.name}</h4>
-                                <p class="group-card-desc">${g.description || '暂无描述'}</p>
+                container.innerHTML = groups.map(g => {
+                    const id = safeNumber(g.id);
+                    const cdkCount = safeNumber(g.cdk_count);
+                    const availableCount = safeNumber(g.available_count);
+                    const groupName = String(g.name || '');
+                    const usedCount = cdkCount - availableCount;
+                    return `
+                        <div class="group-card">
+                            <div class="group-card-header">
+                                <div>
+                                    <h4 class="group-card-title">${escapeHtml(groupName)}</h4>
+                                    <p class="group-card-desc">${escapeHtml(g.description || '暂无描述')}</p>
+                                </div>
+                                <span class="group-card-id">#${id}</span>
                             </div>
-                            <span class="group-card-id">#${g.id}</span>
+                            <div class="group-card-stats">
+                                <div class="group-stat">
+                                    <span class="group-stat-value">${cdkCount}</span>
+                                    <span class="group-stat-label">总数</span>
+                                </div>
+                                <div class="group-stat">
+                                    <span class="group-stat-value available">${availableCount}</span>
+                                    <span class="group-stat-label">可用</span>
+                                </div>
+                                <div class="group-stat">
+                                    <span class="group-stat-value" style="color: var(--warning-border);">${usedCount}</span>
+                                    <span class="group-stat-label">已用</span>
+                                </div>
+                            </div>
+                            <div class="group-card-footer">
+                                <span class="group-card-time">创建于 ${escapeHtml(formatDate(g.created_at))}</span>
+                                <button class="group-delete-btn" data-group-id="${id}" data-group-name="${escapeAttr(groupName)}" data-cdk-count="${cdkCount}" onclick="handleDeleteGroup(this)">删除</button>
+                            </div>
                         </div>
-                        <div class="group-card-stats">
-                            <div class="group-stat">
-                                <span class="group-stat-value">${g.cdk_count}</span>
-                                <span class="group-stat-label">总数</span>
-                            </div>
-                            <div class="group-stat">
-                                <span class="group-stat-value available">${g.available_count}</span>
-                                <span class="group-stat-label">可用</span>
-                            </div>
-                            <div class="group-stat">
-                                <span class="group-stat-value" style="color: var(--warning-border);">${g.cdk_count - g.available_count}</span>
-                                <span class="group-stat-label">已用</span>
-                            </div>
-                        </div>
-                        <div class="group-card-footer">
-                            <span class="group-card-time">创建于 ${formatDate(g.created_at)}</span>
-                            <button class="group-delete-btn" onclick="deleteGroup(${g.id}, '${g.name.replace(/'/g, "\\'")}', ${g.cdk_count})">删除</button>
-                        </div>
-                    </div>
-                `).join('');
+                    `;
+                }).join('');
             } catch (error) {
                 console.error('Failed to load CDK groups:', error);
             }
+        }
+
+        function handleDeleteGroup(button) {
+            deleteGroup(
+                safeNumber(button.dataset.groupId),
+                button.dataset.groupName || '',
+                safeNumber(button.dataset.cdkCount)
+            );
         }
 
         async function createGroup() {

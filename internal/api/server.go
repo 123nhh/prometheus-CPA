@@ -22,7 +22,7 @@ import (
 type PendingAuth struct {
 	State             string
 	Type              string
-	GroupID           *int64          // CDK分组ID
+	GroupID           *int64 // CDK分组ID
 	CreatedAt         time.Time
 	ExistingEmails    map[string]bool // 提交回调前已存在的邮箱列表
 	AuthFilesProvider string          // auth-files API 中使用的 provider 名称
@@ -83,18 +83,18 @@ func (s *Server) getOrCreateCDK(groupID *int64) (*database.CDK, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// 如果有可用的CDK，直接返回
 	if cdkRecord != nil {
 		return cdkRecord, nil
 	}
-	
+
 	// CDK已用完，查找或创建"待兑换"分组
 	groups, err := s.db.ListCDKGroups()
 	if err != nil {
 		return nil, fmt.Errorf("列出分组失败: %w", err)
 	}
-	
+
 	var pendingGroupID *int64
 	for _, g := range groups {
 		if g.Name == "待兑换" {
@@ -102,7 +102,7 @@ func (s *Server) getOrCreateCDK(groupID *int64) (*database.CDK, error) {
 			break
 		}
 	}
-	
+
 	// 如果没有"待兑换"分组，创建一个
 	if pendingGroupID == nil {
 		newGroup, err := s.db.CreateCDKGroup("待兑换", "CDK池耗尽时自动创建的分组，需要用户自行兑换")
@@ -111,24 +111,24 @@ func (s *Server) getOrCreateCDK(groupID *int64) (*database.CDK, error) {
 		}
 		pendingGroupID = &newGroup.ID
 	}
-	
+
 	// 生成新的CDK
 	newCode, err := s.cdkGen.Generate()
 	if err != nil {
 		return nil, fmt.Errorf("生成CDK失败: %w", err)
 	}
-	
+
 	// 添加到待兑换分组
 	if err := s.db.AddCDK(newCode, pendingGroupID); err != nil {
 		return nil, fmt.Errorf("添加CDK失败: %w", err)
 	}
-	
+
 	// 再次获取刚创建的CDK
 	cdkRecord, err = s.db.GetAvailableCDK(pendingGroupID)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	return cdkRecord, nil
 }
 
@@ -152,11 +152,11 @@ func (s *Server) setupRoutes() {
 		api.GET("/auth/status", s.authStatusHandler)
 		api.POST("/auth/callback", s.authCallbackHandler) // 提交回调URL
 		api.POST("/auth/complete", s.authCompleteHandler)
-		api.POST("/auth/iflow", s.iflowAuthHandler)       // iFlow Cookie登录
+		api.POST("/auth/iflow", s.iflowAuthHandler) // iFlow Cookie登录
 
 		// 公开API
 		api.GET("/site-config", s.getSiteConfigHandler)
-		api.GET("/channels", s.getChannelsHandler)    // 获取渠道配置
+		api.GET("/channels", s.getChannelsHandler)           // 获取渠道配置
 		api.GET("/cdk-groups", s.listCDKGroupsPublicHandler) // 公开的CDK分组列表
 		api.GET("/public-stats", s.publicStatsHandler)       // 公开统计（仅凭证数量）
 
@@ -166,21 +166,22 @@ func (s *Server) setupRoutes() {
 		{
 			admin.GET("/stats", s.statsHandler)
 			admin.GET("/credentials", s.listCredentialsHandler)
+			admin.DELETE("/credentials/:id", s.deleteCredentialHandler)
 			admin.GET("/cdks", s.listCDKsHandler)
 			admin.POST("/site-config", s.setSiteConfigHandler)
-			
+
 			// CDK管理
-			admin.POST("/cdks", s.addCDKHandler)           // 添加单个CDK
-			admin.POST("/cdks/batch", s.batchAddCDKHandler) // 批量导入CDK
-			admin.DELETE("/cdks/:id", s.deleteCDKHandler)   // 删除CDK
+			admin.POST("/cdks", s.addCDKHandler)                      // 添加单个CDK
+			admin.POST("/cdks/batch", s.batchAddCDKHandler)           // 批量导入CDK
+			admin.DELETE("/cdks/:id", s.deleteCDKHandler)             // 删除CDK
 			admin.POST("/cdks/batch-delete", s.batchDeleteCDKHandler) // 批量删除CDK
-			
+
 			// CDK分组管理
 			admin.GET("/cdk-groups", s.listCDKGroupsHandler)
 			admin.POST("/cdk-groups", s.createCDKGroupHandler)
 			admin.PUT("/cdk-groups/:id", s.updateCDKGroupHandler)
 			admin.DELETE("/cdk-groups/:id", s.deleteCDKGroupHandler)
-			
+
 			// 渠道管理
 			admin.POST("/channels", s.setChannelHandler)
 		}
@@ -467,8 +468,8 @@ func (s *Server) authCallbackHandler(c *gin.Context) {
 	authFilesProvider := "antigravity"
 	switch pending.Type {
 	case "gemini_cli":
-		oauthProvider = "gemini"           // oauth-callback API 用 "gemini"
-		authFilesProvider = "gemini-cli"   // auth-files 返回 "gemini-cli"
+		oauthProvider = "gemini"         // oauth-callback API 用 "gemini"
+		authFilesProvider = "gemini-cli" // auth-files 返回 "gemini-cli"
 	case "codex":
 		oauthProvider = "codex"
 		authFilesProvider = "codex"
@@ -557,6 +558,12 @@ type AuthCompleteRequest struct {
 	State string `json:"state" binding:"required"`
 }
 
+func (s *Server) deletePendingAuth(state string) {
+	s.pendingMu.Lock()
+	delete(s.pendingAuths, state)
+	s.pendingMu.Unlock()
+}
+
 // authCompleteHandler 确认授权完成并生成CDK
 func (s *Server) authCompleteHandler(c *gin.Context) {
 	var req AuthCompleteRequest
@@ -570,12 +577,9 @@ func (s *Server) authCompleteHandler(c *gin.Context) {
 	}
 
 	// 检查是否是我们跟踪的授权
-	s.pendingMu.Lock()
+	s.pendingMu.RLock()
 	pending, exists := s.pendingAuths[req.State]
-	if exists {
-		delete(s.pendingAuths, req.State)
-	}
-	s.pendingMu.Unlock()
+	s.pendingMu.RUnlock()
 
 	if !exists {
 		c.JSON(http.StatusNotFound, AuthStatusResponse{
@@ -641,6 +645,7 @@ func (s *Server) authCompleteHandler(c *gin.Context) {
 
 		if hasAnyCredential && pending.ExistingEmails != nil && len(pending.ExistingEmails) > 0 {
 			// 有凭证存在，且都在之前的列表中 - 说明是重复账号
+			s.deletePendingAuth(req.State)
 			c.JSON(http.StatusConflict, AuthStatusResponse{
 				Success: false,
 				Status:  "error",
@@ -673,6 +678,7 @@ func (s *Server) authCompleteHandler(c *gin.Context) {
 	}
 
 	if credExists {
+		s.deletePendingAuth(req.State)
 		c.JSON(http.StatusConflict, AuthStatusResponse{
 			Success: false,
 			Status:  "error",
@@ -721,6 +727,7 @@ func (s *Server) authCompleteHandler(c *gin.Context) {
 
 	// 将CDK分配给凭证
 	if err := s.db.AssignCDKToCredential(cdkRecord.ID, credential.ID); err != nil {
+		_, _ = s.db.DeleteCredential(credential.ID)
 		c.JSON(http.StatusInternalServerError, AuthStatusResponse{
 			Success: false,
 			Status:  "error",
@@ -760,6 +767,7 @@ func (s *Server) authCompleteHandler(c *gin.Context) {
 		}
 	}
 
+	s.deletePendingAuth(req.State)
 	c.JSON(http.StatusOK, AuthStatusResponse{
 		Success: true,
 		Status:  "success",
@@ -885,6 +893,7 @@ func (s *Server) iflowAuthHandler(c *gin.Context) {
 
 	// 将CDK分配给凭证
 	if err := s.db.AssignCDKToCredential(cdkRecord.ID, credential.ID); err != nil {
+		_, _ = s.db.DeleteCredential(credential.ID)
 		c.JSON(http.StatusInternalServerError, AuthStartResponse{
 			Success: false,
 			Message: "分配CDK失败",
@@ -989,10 +998,26 @@ func (s *Server) publicStatsHandler(c *gin.Context) {
 	})
 }
 
+func getPaginationParams(c *gin.Context) (int, int) {
+	limit, err := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	if err != nil || limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	offset, err := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	if err != nil || offset < 0 {
+		offset = 0
+	}
+
+	return limit, offset
+}
+
 // listCredentialsHandler 列出凭证
 func (s *Server) listCredentialsHandler(c *gin.Context) {
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	limit, offset := getPaginationParams(c)
 
 	credentials, total, err := s.db.ListCredentials(limit, offset)
 	if err != nil {
@@ -1008,10 +1033,31 @@ func (s *Server) listCredentialsHandler(c *gin.Context) {
 	})
 }
 
+// deleteCredentialHandler 删除凭证
+func (s *Server) deleteCredentialHandler(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的ID"})
+		return
+	}
+
+	deleted, err := s.db.DeleteCredential(id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if deleted == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "凭证不存在"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "凭证删除成功"})
+}
+
 // listCDKsHandler 列出CDK
 func (s *Server) listCDKsHandler(c *gin.Context) {
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
-	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	limit, offset := getPaginationParams(c)
 
 	cdks, total, err := s.db.ListCDKs(limit, offset)
 	if err != nil {
@@ -1096,7 +1142,7 @@ func (s *Server) addCDKHandler(c *gin.Context) {
 
 // BatchAddCDKRequest 批量添加CDK请求
 type BatchAddCDKRequest struct {
-	Codes   []string `json:"codes"`   // JSON方式
+	Codes   []string `json:"codes"` // JSON方式
 	GroupID *int64   `json:"group_id,omitempty"`
 }
 
@@ -1132,7 +1178,7 @@ func (s *Server) batchAddCDKHandler(c *gin.Context) {
 				codes = append(codes, code)
 			}
 		}
-		
+
 		// 获取分组ID（从表单字段）
 		if gidStr := c.PostForm("group_id"); gidStr != "" {
 			if gid, err := strconv.ParseInt(gidStr, 10, 64); err == nil {
@@ -1192,23 +1238,23 @@ func (s *Server) batchDeleteCDKHandler(c *gin.Context) {
 	var req struct {
 		IDs []int64 `json:"ids"`
 	}
-	
+
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "请求格式错误"})
 		return
 	}
-	
+
 	if len(req.IDs) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "请选择要删除的CDK"})
 		return
 	}
-	
+
 	deleted, err := s.db.BatchDeleteCDK(req.IDs)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	
+
 	c.JSON(http.StatusOK, gin.H{"success": true, "deleted": deleted})
 }
 
@@ -1222,14 +1268,14 @@ func (s *Server) getChannelsHandler(c *gin.Context) {
 		"codex":       true,
 		"iflow":       true,
 	}
-	
+
 	for name := range channels {
 		val, _ := s.db.GetSiteConfig("channel_" + name)
 		if val == "false" {
 			channels[name] = false
 		}
 	}
-	
+
 	c.JSON(http.StatusOK, channels)
 }
 
@@ -1246,24 +1292,24 @@ func (s *Server) setChannelHandler(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	
+
 	// 验证渠道名称
 	validChannels := map[string]bool{"antigravity": true, "gemini_cli": true, "codex": true, "iflow": true}
 	if !validChannels[req.Channel] {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的渠道名称"})
 		return
 	}
-	
+
 	value := "true"
 	if !req.Enabled {
 		value = "false"
 	}
-	
+
 	if err := s.db.SetSiteConfig("channel_"+req.Channel, value); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	
+
 	c.JSON(http.StatusOK, gin.H{"success": true})
 }
 
@@ -1302,13 +1348,13 @@ func (s *Server) createCDKGroupHandler(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	
+
 	group, err := s.db.CreateCDKGroup(req.Name, req.Description)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	
+
 	c.JSON(http.StatusOK, group)
 }
 
@@ -1320,18 +1366,18 @@ func (s *Server) updateCDKGroupHandler(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的ID"})
 		return
 	}
-	
+
 	var req CreateCDKGroupRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	
+
 	if err := s.db.UpdateCDKGroup(id, req.Name, req.Description); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	
+
 	c.JSON(http.StatusOK, gin.H{"success": true})
 }
 
@@ -1343,10 +1389,10 @@ func (s *Server) deleteCDKGroupHandler(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的ID"})
 		return
 	}
-	
+
 	// 检查是否强制删除（包括分组内所有CDK）
 	force := c.Query("force") == "true"
-	
+
 	if force {
 		// 强制删除：先删除分组内所有CDK，再删除分组
 		if err := s.db.DeleteCDKGroupWithCDKs(id); err != nil {
@@ -1360,6 +1406,6 @@ func (s *Server) deleteCDKGroupHandler(c *gin.Context) {
 			return
 		}
 	}
-	
+
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "分组删除成功"})
 }

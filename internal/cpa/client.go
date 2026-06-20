@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -186,7 +187,15 @@ func (c *Client) getAuthURL(ctx context.Context, endpoint string) (*AuthURLRespo
 
 // GetAuthStatus 获取授权状态
 func (c *Client) GetAuthStatus(ctx context.Context, state string) (*AuthStatusResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/v0/management/get-auth-status?state="+state, nil)
+	statusURL, err := url.Parse(c.baseURL + "/v0/management/get-auth-status")
+	if err != nil {
+		return nil, fmt.Errorf("parse request URL failed: %w", err)
+	}
+	query := statusURL.Query()
+	query.Set("state", state)
+	statusURL.RawQuery = query.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", statusURL.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request failed: %w", err)
 	}
@@ -275,7 +284,7 @@ func (c *Client) WaitForAuthComplete(ctx context.Context, state, provider string
 		}
 
 		// 如果有错误消息，说明授权失败
-		if status.Message != "" && status.Message != "" {
+		if status.Message != "" {
 			return status, fmt.Errorf("auth failed: %s", status.Message)
 		}
 

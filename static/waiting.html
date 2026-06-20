@@ -82,10 +82,13 @@
 
         // 主题逻辑
         function setTheme(theme) {
+            const allowedThemes = new Set(['light', 'ocean', 'gold', 'neon']);
+            if (!allowedThemes.has(theme)) theme = 'light';
             document.body.removeAttribute('data-theme');
             if (theme !== 'ocean') document.body.setAttribute('data-theme', theme);
             document.querySelectorAll('.theme-btn').forEach(btn => btn.classList.remove('active'));
-            document.querySelector(`.t-${theme}`).classList.add('active');
+            const themeBtn = document.querySelector(`.t-${theme}`);
+            if (themeBtn) themeBtn.classList.add('active');
             localStorage.setItem('site-theme', theme);
         }
         setTheme(localStorage.getItem('site-theme') || 'light');
